@@ -1,0 +1,27 @@
+{
+  "name": "cascade-verify",
+  "version": "0.1.0",
+  "description": "Offline, zero-dependency verifier for Cascade receipt bundles: hash chain, Ed25519 signatures, exclusivity, zero tokens.",
+  "license": "MIT",
+  "author": "Cascade Dynamics",
+  "homepage": "https://cascadedynamics.ai/verify.html",
+  "keywords": ["cascade", "verify", "receipts", "audit", "ed25519", "hash-chain", "offline"],
+  "type": "commonjs",
+  "main": "lib/verify.js",
+  "bin": {
+    "cascade-verify": "bin/cascade-verify.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "SPEC.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

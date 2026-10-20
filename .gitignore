@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+# internal build notes, not part of the public repo
+RESULTS.md

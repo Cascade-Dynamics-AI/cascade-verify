@@ -1,0 +1,24 @@
+async function runChecks(bundle){
+  const chain=(bundle.chain||[]).slice();
+  const key=await activeKey();
+  const out=[];
+  // 01 integrity
+  let t0=performance.now(), prev='genesis', intactTo=0, brokenAt=null, ok1=true;
+  for(let i=0;i<chain.length;i++){ const {hash,sig,...rest}=chain[i]; const h=(await sha256hex(prev+JSON.stringify(rest))).slice(0,16); if(h!==hash||rest.prev!==prev){ok1=false;brokenAt=i+1;break;} prev=hash; intactTo=i+1; }
+  out.push({pass:ok1, ms:Math.round(performance.now()-t0), detail:ok1?`every entry hashes to its successor · ${chain.length} links walked`:`break at entry ${brokenAt} — prev_hash does not match its predecessor`, brokenAt});
+  // 02 signatures
+  t0=performance.now(); let ok2=true, sigChecked=0, sigBrokeAt=null, sigMissing=false;
+  // An entry with no signature FAILS: skipping it would let anyone strip the
+  // signatures, edit entries, recompute the (unsigned) hash links and pass.
+  if(key){ if(!chain.length){ok2=false;} for(let i=0;i<chain.length;i++){ const e=chain[i]; if(typeof e.sig!=='string'||!e.sig){ok2=false;sigBrokeAt=i+1;sigMissing=true;break;} const good=await crypto.subtle.verify('Ed25519',key,b64ToBytes(e.sig),enc.encode(e.hash)); sigChecked++; if(!good){ok2=false;sigBrokeAt=i+1;break;} } }
+  const keySrc=KEY_SRC==='USER'?'your expected key':KEY_SRC==='BUNDLE'?"the bundle's embedded key":'the published key';
+  out.push({pass:key?ok2:null, ms:Math.round(performance.now()-t0), detail:!key?'this browser lacks WebCrypto Ed25519 — integrity check still valid':(ok2?`${sigChecked} signatures verified against ${keySrc}`:!chain.length?'the bundle has no entries to check':sigMissing?`entry ${sigBrokeAt} has no signature — every entry must be signed`:`signature no longer covers entry ${sigBrokeAt} — recomputed digest differs against ${keySrc}`), brokenAt:sigBrokeAt});
+  // 03 exclusivity
+  t0=performance.now(); const held={}; let dupes=0, assigns=0;
+  for(const e of chain){ if(e.verb==='ASSIGN'){assigns++; if(held[e.cell]&&held[e.cell]!==e.agent)dupes++; held[e.cell]=e.agent;} else if(e.verb==='RELEASE'){delete held[e.cell];} }
+  out.push({pass:dupes===0, ms:Math.round(performance.now()-t0), detail:`no cell granted twice · ${dupes} duplicate(s) across ${assigns} grants`});
+  // 04 zero-token
+  t0=performance.now(); const paid=chain.filter(e=>(e.tokens_used&&e.tokens_used>0)||(e.model&&/haiku|sonnet|opus|gpt|claude/i.test(String(e.model))));
+  out.push({pass:paid.length===0, ms:Math.round(performance.now()-t0), detail:paid.length===0?`no decision entry invoked a model · 0 tokens`:`${paid.length} entr(y/ies) carried a model cost`});
+  return out;
+}
