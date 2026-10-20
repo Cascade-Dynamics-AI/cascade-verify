@@ -1,7 +1,7 @@
 {
   "name": "cascade-verify",
-  "version": "0.1.0",
-  "description": "Offline, zero-dependency verifier for Cascade receipt bundles: hash chain, Ed25519 signatures, exclusivity, zero tokens.",
+  "version": "0.2.0",
+  "description": "Offline, zero-dependency verifier for Cascade receipt bundles (formats v1 and v2): hash chain, Ed25519 signatures, exclusivity, zero tokens.",
   "license": "MIT",
   "author": "Cascade Dynamics",
   "homepage": "https://cascadedynamics.ai/verify.html",

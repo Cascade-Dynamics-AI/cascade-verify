@@ -14,9 +14,11 @@ npx cascade-verify bundle.json --key MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC
 ```
 
 ```
-cascade-verify 0.1.0: run 31676d43, 2,252 entries
+cascade-verify 0.2.0: run 31676d43, 2,252 entries
 key: pinned with --key
      MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=  (sha256 4704:83ca:00aa:208e)
+format: v1
+note: no seal: entries dropped from the end of a v1 bundle would not be detected
 
   PASS  1. Chain integrity  2252 links walked from genesis; head 1b6e0eb98c2bc2c5  (9.8 ms)
   PASS  2. Signatures       2252 of 2252 signatures verified  (272.8 ms)
@@ -101,19 +103,29 @@ It does **not** show that:
 * the signer was honest when it made the decisions. The checks show the record
   is intact and internally consistent, not that the coordinator ran correct
   code;
-* the bundle is complete at the end. Entries dropped from the end of a chain
-  leave a shorter chain that still verifies. Compare the head hash and entry
-  count with values you recorded separately if that matters to you;
+* for a **v1** bundle, that it is complete at the end. Entries dropped from the
+  end of a v1 chain leave a shorter chain that still verifies. Format v2 closes
+  this: a v2 bundle carries a signed seal over its entry count and head, and a
+  bundle cut short fails check 1 naming the first missing entry. Even in v2 the
+  seal shows completeness as of the time it was signed (printed with the
+  result), and cannot stop the signer itself from sealing a shorter history;
+  keep the `entry_hash` receipts the API returns if that matters to you;
 * anything about time. Timestamps are not checked;
 * that the key you pinned is the right one. That is your part: get it from a
   source you trust, ahead of time.
 
-## Known limitation: 64-bit hashes
+## Formats v1 and v2
 
 Bundle format v1 truncates each SHA-256 hash to 16 hex characters (64 bits),
 and the signatures cover those truncated hashes. That is weaker than a
-long-lived audit record should be; SPEC.md §5 gives the numbers. A format v2
-with full-length hashes is planned; this tool verifies format v1 only.
+long-lived audit record should be; SPEC.md §5 gives the numbers.
+
+Format v2 (SPEC.md §6) uses the full 256-bit hash, signed in full, records each
+entry's position and a run header inside the signed body, and adds the signed
+seal described above. This tool verifies both, entry by entry: v1 bundles
+verify exactly as before, a v1 chain that continues in v2 is checked across
+the boundary, and a chain may never go back from v2 to v1. The output names
+the format, the seal, and whether the bundle is a segment of a longer chain.
 
 ## Development
 
@@ -126,9 +138,14 @@ The test suite runs the CLI against the public sample run
 (`test/fixtures/proof-sample.json`, 2,252 entries) and against forged copies:
 a changed byte, stripped and rebuilt signatures, a wrong key, an injected
 double grant re-signed with a throwaway key, an added token count, and
-malformed input. It also runs the browser verifier's own `runChecks` function
-(a verbatim excerpt in `reference/`) on the same copies and asserts both reach
-the same verdicts.
+malformed input. For format v2 it uses fixtures written by Cascade's own
+writer with a throwaway key (`test/fixtures/v2-*.json`: a v2 run, a v1 run
+rolled over to v2, and a segment) and forged copies: a tampered entry,
+stripped signatures, a cut-short tail with and without its seal, an edited
+seal, a wrong key, a downgrade, a wrong position, a missing header, a short
+hash, a forged rollover and a lost segment anchor. It also runs the browser
+verifier's own `runChecks` function (a verbatim excerpt in `reference/`) on
+the same copies and asserts both reach the same verdicts.
 
 ## License
 

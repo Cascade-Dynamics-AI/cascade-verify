@@ -4,7 +4,8 @@
 //
 // page-runChecks.txt and page-helpers.txt are verbatim excerpts of that page's
 // inline script (function runChecks, plus the b64ToBytes and sha256hex
-// helpers), snapshotted 2026-10-19. scripts/check-page-drift.js compares the
+// helpers), snapshotted 2026-10-19; runChecks re-snapshotted 2026-10-20 from the
+// format-v2 page (branch chain-v2 of the site repo, not yet deployed). scripts/check-page-drift.js compares the
 // snapshot with the live page; it is the only part of this repo that uses the
 // network, and it is never run by the tests.
 

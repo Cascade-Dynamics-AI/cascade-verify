@@ -110,6 +110,10 @@ function main(argv) {
       entries: report.entries,
       key: { source: keySource, spki_b64: key.spkiB64, fingerprint: fingerprint(key.spkiB64),
         embedded_differs: Boolean(embeddedDiffers) },
+      formats: report.formats,
+      seal: report.seal,
+      segment: report.segment,
+      notes: report.notes,
       checks: report.checks.map((c) => ({ id: c.id, title: c.title, pass: c.pass,
         broken_at: c.brokenAt, detail: c.detail, ms: +c.ms.toFixed(2) })),
       total_ms: +report.totalMs.toFixed(2),
@@ -123,6 +127,12 @@ function main(argv) {
   out.push(`key: ${keySource === 'pinned' ? 'pinned with --key' : 'EMBEDDED in the bundle (not independently pinned)'}`);
   out.push(`     ${key.spkiB64}  (sha256 ${fingerprint(key.spkiB64)})`);
   if (embeddedDiffers) out.push('     note: the bundle embeds a DIFFERENT key than the one you pinned');
+  const { v1, v2 } = report.formats;
+  out.push(`format: ${v2 === 0 ? 'v1' : v1 === 0 ? 'v2' : `v1 (${fmt(v1)} entries), then v2 (${fmt(v2)} entries)`}` +
+    (v2 === 0 && v1 === 0 ? ' (not determined: the chain check stopped early)' : ''));
+  if (report.seal) out.push(`seal: commits to entry ${fmt(report.seal.seq)}, signed ${report.seal.at || '(no time)'}`);
+  if (report.segment) out.push(`segment: entries ${fmt(report.segment.from)}-${fmt(report.segment.to)} of a longer chain`);
+  for (const n of report.notes) out.push(`note: ${n}`);
   out.push('');
   report.checks.forEach((c, i) => {
     out.push(`  ${c.pass ? 'PASS' : 'FAIL'}  ${i + 1}. ${c.title.padEnd(16)} ${c.detail}  (${c.ms.toFixed(1)} ms)`);

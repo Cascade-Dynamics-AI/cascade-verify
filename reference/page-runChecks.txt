@@ -1,18 +1,60 @@
 async function runChecks(bundle){
   const chain=(bundle.chain||[]).slice();
+  const seal=bundle.seal==null?null:bundle.seal, anchor=bundle.anchor==null?null:bundle.anchor;
   const key=await activeKey();
   const out=[];
-  // 01 integrity
-  let t0=performance.now(), prev='genesis', intactTo=0, brokenAt=null, ok1=true;
-  for(let i=0;i<chain.length;i++){ const {hash,sig,...rest}=chain[i]; const h=(await sha256hex(prev+JSON.stringify(rest))).slice(0,16); if(h!==hash||rest.prev!==prev){ok1=false;brokenAt=i+1;break;} prev=hash; intactTo=i+1; }
-  out.push({pass:ok1, ms:Math.round(performance.now()-t0), detail:ok1?`every entry hashes to its successor · ${chain.length} links walked`:`break at entry ${brokenAt} — prev_hash does not match its predecessor`, brokenAt});
+  const isObj=(x)=>x!==null&&typeof x==='object'&&!Array.isArray(x);
+  const edOk=async(sigB64,msg)=>{ try{ return await crypto.subtle.verify('Ed25519',key,b64ToBytes(sigB64),enc.encode(msg)); }catch(e){ return false; } };
+  // 01 integrity. Each entry by its own format (docs/program/CHAIN-V2.md):
+  // v1 (no `v`) = sha256 cut to 16 hex; v2 (`v:2`) = the full 64 hex, `seq` =
+  // its position, a run header on the first v2 entry, never back to v1. Then
+  // completeness: the signed seal's entry count and head must match the end.
+  let t0=performance.now(), prev='genesis', brokenAt=null, ok1=true, why='', off=0, v2n=0, hdrRun;
+  const bad=(at,msg)=>{ ok1=false; brokenAt=at; why=msg; };
+  if(anchor!==null){ const f=chain[0];
+    if(!isObj(anchor)||!Number.isInteger(anchor.seq)||anchor.seq<1||typeof anchor.hash!=='string') bad(1,'the bundle\'s segment anchor is malformed');
+    else if(!f||f.v!==2||f.seq!==anchor.seq+1) bad(1,'the segment anchor does not match the first entry');
+    else { prev=anchor.hash; off=anchor.seq; } }
+  for(let i=0;ok1&&i<chain.length;i++){
+    const pos=off+i+1, e=chain[i], {hash,sig,...rest}=e, v=e.v===2?2:1;
+    if(e.v!==undefined&&e.v!==2){ bad(pos,'unknown format version'); break; }
+    if(v===1&&v2n){ bad(pos,'a v1 entry after v2 entries — a format downgrade is never valid'); break; }
+    const h=(await sha256hex(prev+JSON.stringify(rest))).slice(0,v===2?64:16);
+    if(h!==hash||rest.prev!==prev){ bad(pos,'prev_hash does not match its predecessor'); break; }
+    if(v===2){
+      if(e.seq!==pos){ bad(pos,'its seq is not its position in the chain'); break; }
+      if(!v2n){ const hd=e.hdr, ro=hd&&hd.rollover;
+        if(hd===undefined&&off&&i===0){ /* segment: the run header is before it */ }
+        else if(!isObj(hd)||hd.format!=='cascade-chain/2'){ bad(pos,'the first v2 entry has no run header'); break; }
+        else if(pos===1?ro!==undefined:(!isObj(ro)||ro.from_format!==1||ro.entries!==pos-1||ro.head!==prev)){ bad(pos,'the rollover header does not match the v1 entries before it'); break; }
+        else if(pos>1&&!off&&ro.prefix_sha256!==await sha256hex(chain.slice(0,i).map(x=>JSON.stringify(x)+'\n').join(''))){ bad(pos,'the rollover header\'s prefix digest does not match the v1 entries before it'); break; }
+        if(isObj(hd)) hdrRun=hd.run;
+      } else if(e.hdr!==undefined){ bad(pos,'a run header on a later entry'); break; }
+      v2n++;
+    }
+    prev=hash;
+  }
+  const n=off+chain.length;
+  if(ok1&&chain.length){
+    if(seal===null){ if(chain[chain.length-1].v===2) bad(null,'no seal — nothing shows this v2 chain is complete'); }
+    else if(!isObj(seal)||seal.format!=='cascade-seal/2'||!Number.isInteger(seal.seq)||seal.seq<1||typeof seal.head!=='string') bad(null,'the seal is malformed');
+    else if(hdrRun!=null&&seal.run!==hdrRun) bad(null,'the seal is for a different run than the chain header');
+    else if(seal.seq>n) bad(n+1,`entries ${n+1}–${seal.seq} are missing — the signed seal commits to ${seal.seq} entries`);
+    else if(seal.seq<=off) bad(null,'the seal ends before this segment starts');
+    else if(chain[seal.seq-off-1].hash!==seal.head) bad(seal.seq,'its hash differs from the head the signed seal commits to');
+  }
+  const sealNote=ok1&&isObj(seal)?` · sealed at entry ${seal.seq}`:'', segNote=off?` · segment from entry ${off+1}`:'';
+  out.push({pass:ok1, ms:Math.round(performance.now()-t0), detail:ok1?`every entry hashes to its successor · ${chain.length} links walked${segNote}${sealNote}`:brokenAt&&brokenAt>n?why:brokenAt?`break at entry ${brokenAt} — ${why}`:why, brokenAt});
   // 02 signatures
-  t0=performance.now(); let ok2=true, sigChecked=0, sigBrokeAt=null, sigMissing=false;
+  t0=performance.now(); let ok2=true, sigChecked=0, sigBrokeAt=null, sigMissing=false, sealBad=false;
+  const soff=isObj(anchor)&&Number.isInteger(anchor.seq)?anchor.seq:0;
   // An entry with no signature FAILS: skipping it would let anyone strip the
   // signatures, edit entries, recompute the (unsigned) hash links and pass.
-  if(key){ if(!chain.length){ok2=false;} for(let i=0;i<chain.length;i++){ const e=chain[i]; if(typeof e.sig!=='string'||!e.sig){ok2=false;sigBrokeAt=i+1;sigMissing=true;break;} const good=await crypto.subtle.verify('Ed25519',key,b64ToBytes(e.sig),enc.encode(e.hash)); sigChecked++; if(!good){ok2=false;sigBrokeAt=i+1;break;} } }
+  if(key){ if(!chain.length){ok2=false;} for(let i=0;i<chain.length;i++){ const e=chain[i]; if(typeof e.sig!=='string'||!e.sig){ok2=false;sigBrokeAt=soff+i+1;sigMissing=true;break;} const good=await edOk(e.sig,e.hash); sigChecked++; if(!good){ok2=false;sigBrokeAt=soff+i+1;break;} }
+    // The seal is signed over exactly {format, run, seq, head, at}, in that order.
+    if(ok2&&seal!==null){ const good=isObj(seal)&&typeof seal.sig==='string'&&await edOk(seal.sig,JSON.stringify({format:seal.format,run:seal.run,seq:seal.seq,head:seal.head,at:seal.at})); if(!good){ok2=false;sealBad=true;} } }
   const keySrc=KEY_SRC==='USER'?'your expected key':KEY_SRC==='BUNDLE'?"the bundle's embedded key":'the published key';
-  out.push({pass:key?ok2:null, ms:Math.round(performance.now()-t0), detail:!key?'this browser lacks WebCrypto Ed25519 — integrity check still valid':(ok2?`${sigChecked} signatures verified against ${keySrc}`:!chain.length?'the bundle has no entries to check':sigMissing?`entry ${sigBrokeAt} has no signature — every entry must be signed`:`signature no longer covers entry ${sigBrokeAt} — recomputed digest differs against ${keySrc}`), brokenAt:sigBrokeAt});
+  out.push({pass:key?ok2:null, ms:Math.round(performance.now()-t0), detail:!key?'this browser lacks WebCrypto Ed25519 — integrity check still valid':(ok2?`${sigChecked} signatures verified against ${keySrc}${seal!==null?' · and the seal':''}`:!chain.length?'the bundle has no entries to check':sealBad?`the seal's signature does not verify against ${keySrc}`:sigMissing?`entry ${sigBrokeAt} has no signature — every entry must be signed`:`signature no longer covers entry ${sigBrokeAt} — recomputed digest differs against ${keySrc}`), brokenAt:sigBrokeAt});
   // 03 exclusivity
   t0=performance.now(); const held={}; let dupes=0, assigns=0;
   for(const e of chain){ if(e.verb==='ASSIGN'){assigns++; if(held[e.cell]&&held[e.cell]!==e.agent)dupes++; held[e.cell]=e.agent;} else if(e.verb==='RELEASE'){delete held[e.cell];} }
