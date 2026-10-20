@@ -5,7 +5,15 @@
   "license": "MIT",
   "author": "Cascade Dynamics",
   "homepage": "https://cascadedynamics.ai/verify.html",
-  "keywords": ["cascade", "verify", "receipts", "audit", "ed25519", "hash-chain", "offline"],
+  "keywords": [
+    "cascade",
+    "verify",
+    "receipts",
+    "audit",
+    "ed25519",
+    "hash-chain",
+    "offline"
+  ],
   "type": "commonjs",
   "main": "lib/verify.js",
   "bin": {
@@ -23,5 +31,12 @@
   },
   "scripts": {
     "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cascade-Dynamics-AI/cascade-verify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cascade-Dynamics-AI/cascade-verify/issues"
   }
 }
