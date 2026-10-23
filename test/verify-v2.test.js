@@ -61,7 +61,7 @@ function rebuild(bundle, privateKey) {
 test('v2 sample, rollover and segment fixtures pass 4/4 under the pinned key', () => {
   const v2 = check(load('v2-sample.json'), V2_KEY);
   assert.equal(v2.code, 0, v2.stderr);
-  assert.deepEqual(verdicts(v2.report), [true, true, true, true]);
+  assert.deepEqual(verdicts(v2.report), [true, true, true, true, null]);
   assert.deepEqual(v2.report.formats, { v1: 0, v2: 120 });
   assert.equal(v2.report.seal.seq, 120);
 
@@ -87,7 +87,7 @@ test('v2 tamper: one changed field fails check 1 at that entry', () => {
   b.chain[49].detail += ' [FORGED]';
   const r = check(b, V2_KEY);
   assert.equal(r.code, 1);
-  assert.deepEqual(verdicts(r.report), [false, true, true, true]);
+  assert.deepEqual(verdicts(r.report), [false, true, true, true, null]);
   assert.equal(r.report.checks[0].broken_at, 50);
 });
 
@@ -96,7 +96,7 @@ test('v2 strip-signature: relinked, unsigned chain passes check 1 but fails chec
   b.chain[10].detail = 'edited after stripping';
   rebuild(b, null);
   const r = check(b, V2_KEY);
-  assert.deepEqual(verdicts(r.report), [true, false, true, true]);
+  assert.deepEqual(verdicts(r.report), [true, false, true, true, null]);
   assert.equal(r.report.checks[1].broken_at, 1);
   assert.match(r.report.checks[1].detail, /no signature/);
 });
@@ -106,7 +106,7 @@ test('v2 truncation: dropping the tail fails check 1 and names the first missing
   b.chain = b.chain.slice(0, 115);
   const r = check(b, V2_KEY);
   assert.equal(r.code, 1);
-  assert.deepEqual(verdicts(r.report), [false, true, true, true]);
+  assert.deepEqual(verdicts(r.report), [false, true, true, true, null]);
   assert.equal(r.report.checks[0].broken_at, 116);
   assert.match(r.report.checks[0].detail, /entries 116-120 are missing/);
   const human = spawnSync(process.execPath, [CLI, writeTmp('cut.json', b), '--key', V2_KEY], { encoding: 'utf8' });
@@ -128,13 +128,13 @@ test('v2 truncation with the seal edited to match fails check 2 (the seal is sig
   b.chain = b.chain.slice(0, 115);
   b.seal = { ...b.seal, seq: 115, head: b.chain[114].hash };
   const r = check(b, V2_KEY);
-  assert.deepEqual(verdicts(r.report), [true, false, true, true]);
+  assert.deepEqual(verdicts(r.report), [true, false, true, true, null]);
   assert.match(r.report.checks[1].detail, /seal/);
 });
 
 test('v2 wrong key fails check 2 at entry 1', () => {
   const r = check(load('v2-sample.json'), throwawayKey().b64);
-  assert.deepEqual(verdicts(r.report), [true, false, true, true]);
+  assert.deepEqual(verdicts(r.report), [true, false, true, true, null]);
   assert.equal(r.report.checks[1].broken_at, 1);
 });
 

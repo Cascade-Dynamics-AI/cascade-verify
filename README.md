@@ -7,25 +7,27 @@ Cascade is a coordination API: agents ask it for a resource (a "cell") and it
 grants, queues or releases. Every decision is appended to a hash chain and
 signed with Ed25519. A run can be exported as one JSON **receipt bundle**.
 `cascade-verify` re-checks that bundle with nothing but Node's built-in crypto.
-It has no dependencies and makes no network calls.
+It has no dependencies and makes no network calls (unless you ask it to fetch
+the public anchor log with `--fetch-anchors`).
 
 ```
-npx cascade-verify bundle.json --key MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=
+npx cascade-verify bundle.json
 ```
 
 ```
-cascade-verify 0.2.0: run 31676d43, 2,252 entries
-key: pinned with --key
+cascade-verify 0.3.0: run 31676d43, 2,252 entries
+key: Cascade production (built in) — the pre-KMS production key, retired
      MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=  (sha256 4704:83ca:00aa:208e)
 format: v1
 note: no seal: entries dropped from the end of a v1 bundle would not be detected
 
-  PASS  1. Chain integrity  2252 links walked from genesis; head 1b6e0eb98c2bc2c5  (9.8 ms)
-  PASS  2. Signatures       2252 of 2252 signatures verified  (272.8 ms)
+  PASS  1. Chain integrity  2252 links walked from genesis; head 1b6e0eb98c2bc2c5  (14.3 ms)
+  PASS  2. Signatures       2252 of 2252 signatures verified  (275.5 ms)
   PASS  3. Exclusivity      0 duplicate grants across 982 ASSIGNs  (0.3 ms)
   PASS  4. Zero tokens      no entry records model tokens or names a model  (0.2 ms)
+  SKIP  5. Anchored         the bundle carries no anchors (anchoring is hourly)  (0.0 ms)
 
-VERIFIED: 4/4 checks passed. 2,252 entries in 283.5 ms, 7,942 entries/s
+VERIFIED: 4/4 checks passed (1 skipped). 2,252 entries in 291.3 ms, 7,730 entries/s
 ```
 
 ## Install
@@ -42,56 +44,85 @@ Or with no package manager at all: copy `bin/` and `lib/` and run
 ## Usage
 
 ```
-cascade-verify <bundle.json> [--key <PEM|base64 file or string>] [--json]
+cascade-verify <bundle.json> [--key <k>] [--root <k>] [--fetch-anchors] [--json]
 ```
 
 | Option | Meaning |
 |--------|---------|
-| `--key <k>` | The Ed25519 public key to verify signatures against: a file path, a PEM block, base64 SPKI, or a base64 raw 32-byte key. |
+| (none) | Check against Cascade's published production keys, built into this tool. |
+| `--key <k>` | Pin a key for entries signed directly (no session key), e.g. an on-prem deployment's own key: a file path, a PEM block, base64 SPKI, or a base64 raw 32-byte key. |
+| `--root <k>` | Pin a root key for session-key certificates and anchors. Repeatable. |
+| `--fetch-anchors` | Download each anchor from the public anchor log and require it to match the bundle's copy. The only option that uses the network. |
+| `--anchor-log <url>` | Base URL of the anchor log (default `https://cascadedynamics.ai/anchors/`). |
+| `--embedded-key` | Use the key embedded in the bundle. Prints a warning: this detects nothing a forger could not redo. |
 | `--json` | Machine-readable result on stdout. |
 | `-` as the bundle | Read the bundle from stdin. |
 
-Exit codes: **0** all four checks pass, **1** at least one check failed,
-**2** bad input (unreadable file, invalid JSON, not a bundle, empty chain, bad key).
+Exit codes: **0** every check passes (a skipped check is not a failure),
+**1** at least one check failed, **2** bad input (unreadable file, invalid
+JSON, not a bundle, empty chain, bad key).
 
 When a check fails, the output names the first broken entry (numbered from 1).
 
-## Pin the key
+## The keys
 
-Without `--key`, signatures are checked against the public key embedded in the
-bundle, and the tool prints a warning. That catches accidental damage and naive
-edits, but not a deliberate forgery: whoever edits a bundle can re-sign it with
-their own key and embed that key instead. **Keep your own copy of the signer's
-public key, obtained before you receive the bundle, and always pass it with
-`--key`.** A re-signed bundle then fails check 2.
-
-Cascade's production signing key, as published at
-<https://cascadedynamics.ai/verify.html> on 2026-10-19:
+A signature check is only as good as the key it trusts. A key that travels with
+the bundle can be swapped by whoever edits the bundle, so this tool **pins
+Cascade's production keys itself**, as published at
+<https://cascadedynamics.ai/verify.html>:
 
 ```
-MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=
+root   MCowBQYDK2VwAyEAulsbuhPp9+zChbyASphQrkm1+TWGrO0Cd8GMQFYWCXw=   (from 2026-10-23)
+legacy MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=   (2026-10-19 to 2026-10-23, retired)
 ```
 
-## The four checks
+* The **root key** was generated inside AWS KMS and cannot be exported, by
+  Cascade or anyone else. It never signs entries: it certifies short-lived
+  **session keys**, which live only in the server's memory, are replaced every
+  hour, and sign the entries. Each bundle carries the certificates for the
+  session keys it uses.
+* The **legacy key** signed entries directly before production moved to session
+  keys. It signs nothing new. A chain may start with legacy-signed entries, but
+  once it is session-signed, a legacy-signed entry after that fails.
+
+For an on-prem deployment, pin its own key with `--key`.
+
+## Anchors
+
+Every hour, Cascade publishes a root-signed Merkle root over the head of every
+chain to a write-once log (S3 Object Lock, compliance mode, seven years: nobody
+can overwrite or delete an anchor, Cascade included). A bundle carries its run's
+anchors with inclusion proofs, and check 5 verifies them. With
+`--fetch-anchors`, the tool also compares each one with the log's copy. Once a
+head is anchored, a history rewritten before it cannot match both the log and
+the chain. The first anchor after the move to session keys (`cutover`) covers
+every chain head the legacy key signed.
+
+## The five checks
 
 1. **Chain integrity.** Every entry re-hashes to its recorded hash, and each
    entry points at the previous entry's hash, starting from `genesis`. Any
    edited byte, inserted, removed or reordered entry breaks the chain.
-2. **Signatures.** Every entry carries an Ed25519 signature over its hash that
-   verifies under the pinned key. An entry with no signature fails.
+2. **Signatures.** Every entry carries an Ed25519 signature over its hash:
+   by a certified session key (named by `kid`), or, for legacy entries, by the
+   pinned key. An entry with no signature fails.
 3. **Exclusivity.** Replaying the grants and releases, no cell was granted to
    one agent while another agent held it.
 4. **Zero tokens.** No entry records model tokens (`tokens_used > 0`) or names
    a model.
+5. **Anchored.** Every anchor in the bundle is signed by the root, its proof
+   leads to this run's head at that point, and the chain has that head. SKIP
+   when the bundle carries no anchors.
 
 The exact format and algorithms are in [SPEC.md](SPEC.md).
-
 ## What a passing result proves, and what it doesn't
 
-A pass, with a key you pinned independently, shows that:
+A pass, with keys pinned independently (the built-in ones, or your own), shows that:
 
-* the holder of that signing key recorded exactly these decisions, in this
+* the holder of those signing keys recorded exactly these decisions, in this
   order, and the record has not been edited since;
+* with anchors that match the public log, that the record up to the anchored
+  head is the one that existed when it was anchored;
 * according to the record, no resource was granted to two agents at once;
 * according to the record, no decision entry used a language model.
 

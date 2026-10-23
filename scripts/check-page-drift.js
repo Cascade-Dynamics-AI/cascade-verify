@@ -11,6 +11,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const URL = 'https://cascadedynamics.ai/verify.html';
+// The CLI's built-in production pins (bin/cascade-verify.js).
+const ROOT = 'MCowBQYDK2VwAyEAulsbuhPp9+zChbyASphQrkm1+TWGrO0Cd8GMQFYWCXw=';
+const PLAIN = 'MCowBQYDK2VwAyEAuJIhdAZ1VQqAs+7rx1c/t3GH9MC9p+PcZfri+mvXTZ8=';
 const snapshot = fs.readFileSync(path.join(__dirname, '..', 'reference', 'page-runChecks.txt'), 'utf8');
 
 (async () => {
@@ -36,8 +39,18 @@ const snapshot = fs.readFileSync(path.join(__dirname, '..', 'reference', 'page-r
     process.exit(2);
   }
   const live = lines.slice(start, end + 1).join('\n');
+  // The pins live outside runChecks: they must equal the CLI's built-in keys.
+  const pins = { PUBKEY_B64: PLAIN, ROOT_B64: ROOT, ANCHOR_LOG: '/anchors/' };
+  const pinErrors = Object.entries(pins).filter(([name, want]) => {
+    const m = html.match(new RegExp(`const ${name}="([^"]*)";`));
+    return !m || m[1] !== want;
+  }).map(([name]) => name);
+  if (pinErrors.length) {
+    console.log(`the page's pinned ${pinErrors.join(', ')} differ from the CLI's built-in values`);
+    process.exit(1);
+  }
   if (live === snapshot) {
-    console.log('live runChecks matches the snapshot');
+    console.log('live runChecks matches the snapshot, and the pinned keys match the CLI');
     process.exit(0);
   }
   console.log('live runChecks DIFFERS from the snapshot; review the change, update');

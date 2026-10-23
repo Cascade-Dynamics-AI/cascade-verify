@@ -1,10 +1,14 @@
 async function runChecks(bundle){
   const chain=(bundle.chain||[]).slice();
   const seal=bundle.seal==null?null:bundle.seal, anchor=bundle.anchor==null?null:bundle.anchor;
-  const key=await activeKey();
+  const certs=Array.isArray(bundle.certs)?bundle.certs:[], anchors=Array.isArray(bundle.anchors)?bundle.anchors:[];
+  const key=await activeKey(), rootKey=await importKeyB64(ROOT_B64);
   const out=[];
   const isObj=(x)=>x!==null&&typeof x==='object'&&!Array.isArray(x);
-  const edOk=async(sigB64,msg)=>{ try{ return await crypto.subtle.verify('Ed25519',key,b64ToBytes(sigB64),enc.encode(msg)); }catch(e){ return false; } };
+  const edWith=async(k,sigB64,msg)=>{ try{ return await crypto.subtle.verify('Ed25519',k,b64ToBytes(sigB64),enc.encode(msg)); }catch(e){ return false; } };
+  const edOk=(sigB64,msg)=>edWith(key,sigB64,msg);
+  // A key's id: the first 16 hex of SHA-256 over its SPKI DER (SPEC.md §7.1).
+  const idOf=async(b64)=>{ try{ const d=await crypto.subtle.digest('SHA-256',b64ToBytes(b64)); return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('').slice(0,16); }catch(e){ return null; } };
   // 01 integrity. Each entry by its own format (docs/program/CHAIN-V2.md):
   // v1 (no `v`) = sha256 cut to 16 hex; v2 (`v:2`) = the full 64 hex, `seq` =
   // its position, a run header on the first v2 entry, never back to v1. Then
@@ -18,6 +22,7 @@ async function runChecks(bundle){
   for(let i=0;ok1&&i<chain.length;i++){
     const pos=off+i+1, e=chain[i], {hash,sig,...rest}=e, v=e.v===2?2:1;
     if(e.v!==undefined&&e.v!==2){ bad(pos,'unknown format version'); break; }
+    if(v===1&&e.kid!==undefined){ bad(pos,'a session-key kid on a v1 entry'); break; }
     if(v===1&&v2n){ bad(pos,'a v1 entry after v2 entries — a format downgrade is never valid'); break; }
     const h=(await sha256hex(prev+JSON.stringify(rest))).slice(0,v===2?64:16);
     if(h!==hash||rest.prev!==prev){ bad(pos,'prev_hash does not match its predecessor'); break; }
@@ -37,7 +42,7 @@ async function runChecks(bundle){
   const n=off+chain.length;
   if(ok1&&chain.length){
     if(seal===null){ if(chain[chain.length-1].v===2) bad(null,'no seal — nothing shows this v2 chain is complete'); }
-    else if(!isObj(seal)||seal.format!=='cascade-seal/2'||!Number.isInteger(seal.seq)||seal.seq<1||typeof seal.head!=='string') bad(null,'the seal is malformed');
+    else if(!isObj(seal)||(seal.format!=='cascade-seal/2'&&seal.format!=='cascade-seal/3')||!Number.isInteger(seal.seq)||seal.seq<1||typeof seal.head!=='string'||(seal.format==='cascade-seal/3'&&typeof seal.kid!=='string')) bad(null,'the seal is malformed');
     else if(hdrRun!=null&&seal.run!==hdrRun) bad(null,'the seal is for a different run than the chain header');
     else if(seal.seq>n) bad(n+1,`entries ${n+1}–${seal.seq} are missing — the signed seal commits to ${seal.seq} entries`);
     else if(seal.seq<=off) bad(null,'the seal ends before this segment starts');
@@ -45,16 +50,61 @@ async function runChecks(bundle){
   }
   const sealNote=ok1&&isObj(seal)?` · sealed at entry ${seal.seq}`:'', segNote=off?` · segment from entry ${off+1}`:'';
   out.push({pass:ok1, ms:Math.round(performance.now()-t0), detail:ok1?`every entry hashes to its successor · ${chain.length} links walked${segNote}${sealNote}`:brokenAt&&brokenAt>n?why:brokenAt?`break at entry ${brokenAt} — ${why}`:why, brokenAt});
-  // 02 signatures
-  t0=performance.now(); let ok2=true, sigChecked=0, sigBrokeAt=null, sigMissing=false, sealBad=false;
-  const soff=isObj(anchor)&&Number.isInteger(anchor.seq)?anchor.seq:0;
-  // An entry with no signature FAILS: skipping it would let anyone strip the
+  // 02 signatures. An entry with `kid` is signed by a short-lived session key
+  // whose certificate (in the bundle) the pinned ROOT signed; session keys only
+  // move forward; once a chain is session-signed, the plain key never signs it
+  // again. An entry without `kid` must verify under the pinned PLAIN key. An
+  // entry with no signature FAILS: skipping it would let anyone strip the
   // signatures, edit entries, recompute the (unsigned) hash links and pass.
-  if(key){ if(!chain.length){ok2=false;} for(let i=0;i<chain.length;i++){ const e=chain[i]; if(typeof e.sig!=='string'||!e.sig){ok2=false;sigBrokeAt=soff+i+1;sigMissing=true;break;} const good=await edOk(e.sig,e.hash); sigChecked++; if(!good){ok2=false;sigBrokeAt=soff+i+1;break;} }
-    // The seal is signed over exactly {format, run, seq, head, at}, in that order.
-    if(ok2&&seal!==null){ const good=isObj(seal)&&typeof seal.sig==='string'&&await edOk(seal.sig,JSON.stringify({format:seal.format,run:seal.run,seq:seal.seq,head:seal.head,at:seal.at})); if(!good){ok2=false;sealBad=true;} } }
-  const keySrc=KEY_SRC==='USER'?'your expected key':KEY_SRC==='BUNDLE'?"the bundle's embedded key":'the published key';
-  out.push({pass:key?ok2:null, ms:Math.round(performance.now()-t0), detail:!key?'this browser lacks WebCrypto Ed25519 — integrity check still valid':(ok2?`${sigChecked} signatures verified against ${keySrc}${seal!==null?' · and the seal':''}`:!chain.length?'the bundle has no entries to check':sealBad?`the seal's signature does not verify against ${keySrc}`:sigMissing?`entry ${sigBrokeAt} has no signature — every entry must be signed`:`signature no longer covers entry ${sigBrokeAt} — recomputed digest differs against ${keySrc}`), brokenAt:sigBrokeAt});
+  t0=performance.now(); let ok2=true, sigChecked=0, sigBrokeAt=null, why2='', plainN=0, sessN=0;
+  const kidsUsed=[], soff=isObj(anchor)&&Number.isInteger(anchor.seq)?anchor.seq:0;
+  const keySrc=KEY_SRC==='USER'?'your expected key':'the published key';
+  const fail2=(at,msg)=>{ ok2=false; sigBrokeAt=at; why2=msg; };
+  if(key&&rootKey){
+    const rootId=await idOf(ROOT_B64), byKid=new Map();
+    for(const c of certs){
+      if(!isObj(c)||c.format!=='cascade-key-cert/1'||typeof c.kid!=='string'||typeof c.key!=='string'||typeof c.root!=='string'||typeof c.not_before!=='string'||typeof c.not_after!=='string'){ fail2(null,'a session-key certificate is malformed'); break; }
+      if(await idOf(c.key)!==c.kid){ fail2(null,`session certificate ${c.kid}: its kid is not its key's id`); break; }
+      if(c.root!==rootId){ fail2(null,`session certificate ${c.kid} is certified by root ${c.root}, not the published root`); break; }
+      if(!await edWith(rootKey,c.root_sig,JSON.stringify({format:c.format,kid:c.kid,key:c.key,root:c.root,not_before:c.not_before,not_after:c.not_after}))){ fail2(null,`session certificate ${c.kid}: the root's signature does not verify`); break; }
+      if(!(Date.parse(c.not_before)<Date.parse(c.not_after))){ fail2(null,`session certificate ${c.kid}: not_before is not before not_after`); break; }
+      const k=await importKeyB64(c.key); if(!k){ fail2(null,`session certificate ${c.kid}: the key could not be read`); break; }
+      byKid.set(c.kid,{c,k});
+    }
+    if(ok2&&!chain.length) fail2(null,'the bundle has no entries to check');
+    let cur=null;
+    for(let i=0;ok2&&i<chain.length;i++){ const e=chain[i], pos=soff+i+1;
+      if(typeof e.sig!=='string'||!e.sig){ fail2(pos,`entry ${pos} has no signature — every entry must be signed`); break; }
+      if(e.kid!==undefined){ const s=byKid.get(e.kid);
+        if(!s){ fail2(pos,`entry ${pos} names session key ${e.kid}, but the bundle has no certificate for it`); break; }
+        if(cur&&cur.c.kid!==e.kid&&Date.parse(s.c.not_before)<Date.parse(cur.c.not_before)){ fail2(pos,`entry ${pos} is signed by session key ${e.kid}, older than ${cur.c.kid} used before it`); break; }
+        if(!await edWith(s.k,e.sig,e.hash)){ fail2(pos,`signature no longer covers entry ${pos} — it does not verify under session key ${e.kid}`); break; }
+        if(!kidsUsed.includes(e.kid)) kidsUsed.push(e.kid);
+        cur=s; sessN++;
+      } else {
+        if(cur){ fail2(pos,`entry ${pos} has no session key after session-signed entries — the plain key never signs a chain again`); break; }
+        if(!await edOk(e.sig,e.hash)){ fail2(pos,`signature no longer covers entry ${pos} — recomputed digest differs against ${keySrc}`); break; }
+        plainN++;
+      }
+      sigChecked++;
+    }
+    // The seal: cascade-seal/3 by a session key, over {format, run, seq, head,
+    // at, kid}, at a time inside its certificate's window; cascade-seal/2 by
+    // the plain key over {format, run, seq, head, at} (legacy only).
+    if(ok2&&seal!==null){
+      if(!isObj(seal)||typeof seal.sig!=='string') fail2(null,'the seal has no signature');
+      else if(seal.format==='cascade-seal/3'){ const s=byKid.get(seal.kid), at=Date.parse(seal.at);
+        if(!s) fail2(null,`the seal names session key ${seal.kid}, but the bundle has no certificate for it`);
+        else if(!(at>=Date.parse(s.c.not_before)&&at<=Date.parse(s.c.not_after))) fail2(null,`the seal's time is outside session key ${seal.kid}'s window`);
+        else if(cur&&Date.parse(s.c.not_before)<Date.parse(cur.c.not_before)) fail2(null,`the seal is signed by session key ${seal.kid}, older than ${cur.c.kid} that signed entries`);
+        else if(!await edWith(s.k,seal.sig,JSON.stringify({format:seal.format,run:seal.run,seq:seal.seq,head:seal.head,at:seal.at,kid:seal.kid}))) fail2(null,`the seal's signature does not verify under session key ${seal.kid}`);
+        else if(!kidsUsed.includes(seal.kid)) kidsUsed.push(seal.kid);
+      } else if(cur) fail2(null,'the seal is signed directly, but the chain is session-signed — a cascade-seal/3 is required');
+      else if(!await edOk(seal.sig,JSON.stringify({format:seal.format,run:seal.run,seq:seal.seq,head:seal.head,at:seal.at}))) fail2(null,`the seal's signature does not verify against ${keySrc}`);
+    }
+  }
+  const how=sessN?` (${plainN?plainN+' by the legacy key, ':''}${sessN} by ${kidsUsed.length} session key${kidsUsed.length===1?'':'s'} certified by the KMS root)`:` against ${keySrc}`;
+  out.push({pass:key&&rootKey?ok2:null, ms:Math.round(performance.now()-t0), detail:!(key&&rootKey)?'this browser lacks WebCrypto Ed25519 — integrity check still valid':(ok2?`${sigChecked} signatures verified${how}${seal!==null?' · and the seal':''}`:why2), brokenAt:sigBrokeAt, kids:kidsUsed});
   // 03 exclusivity
   t0=performance.now(); const held={}; let dupes=0, assigns=0;
   for(const e of chain){ if(e.verb==='ASSIGN'){assigns++; if(held[e.cell]&&held[e.cell]!==e.agent)dupes++; held[e.cell]=e.agent;} else if(e.verb==='RELEASE'){delete held[e.cell];} }
@@ -62,5 +112,42 @@ async function runChecks(bundle){
   // 04 zero-token
   t0=performance.now(); const paid=chain.filter(e=>(e.tokens_used&&e.tokens_used>0)||(e.model&&/haiku|sonnet|opus|gpt|claude/i.test(String(e.model))));
   out.push({pass:paid.length===0, ms:Math.round(performance.now()-t0), detail:paid.length===0?`no decision entry invoked a model · 0 tokens`:`${paid.length} entr(y/ies) carried a model cost`});
+  // 05 anchored (SPEC.md §8): each anchor is a root-signed Merkle root over
+  // chain heads; its proof must lead from this run's (seq, head) to it, the
+  // chain must have that head, and the copy must match the public, write-once
+  // log. No anchors: SKIP (anchoring is hourly). Offline: SKIP, said plainly —
+  // the signatures were checked, the log comparison was not.
+  t0=performance.now(); let ok5=null, d5='the bundle carries no anchors yet (anchoring is hourly)', b5=null;
+  if(anchors.length&&!rootKey){ d5='this browser lacks WebCrypto Ed25519'; }
+  else if(anchors.length){ ok5=true; const rootId=await idOf(ROOT_B64); let latest=null, cut=false;
+    for(const a of anchors){
+      const d=isObj(a)&&a.doc, l=isObj(a)&&a.leaf;
+      if(!isObj(d)||!isObj(l)||!Array.isArray(a.proof)||d.format!=='cascade-anchor/1'||typeof d.at!=='string'||typeof d.merkle_root!=='string'){ ok5=false; d5='an anchor is malformed'; break; }
+      if(d.root!==rootId){ ok5=false; d5=`the anchor of ${d.at} is signed by root ${d.root}, not the published root`; break; }
+      if(!await edWith(rootKey,d.sig,JSON.stringify({format:d.format,at:d.at,count:d.count,merkle_root:d.merkle_root,cutover:d.cutover===true}))){ ok5=false; d5=`the anchor of ${d.at}: the root's signature does not verify`; break; }
+      if(bundle.run!=null&&l.run!==bundle.run){ ok5=false; d5=`the anchor of ${d.at} is for another run`; break; }
+      let h=await sha256hex('leaf:'+JSON.stringify({run:l.run,seq:l.seq,head:l.head}));
+      for(const st of a.proof){ if(!isObj(st)||typeof st.hash!=='string'||(st.side!=='L'&&st.side!=='R')){ h=null; break; } h=await sha256hex('node:'+(st.side==='L'?st.hash+h:h+st.hash)); }
+      if(h!==d.merkle_root){ ok5=false; d5=`the anchor of ${d.at}: the inclusion proof does not lead to the signed root`; break; }
+      const ix=l.seq-off-1;
+      if(!Number.isInteger(l.seq)||ix<0||ix>=chain.length){ ok5=false; d5=`the anchor of ${d.at} names entry ${l.seq}, which is not in this bundle`; break; }
+      if(chain[ix].hash!==l.head){ ok5=false; b5=l.seq; d5=`entry ${l.seq}: its hash differs from the head anchored at ${d.at}`; break; }
+      if(d.cutover===true) cut=true;
+      if(!latest||l.seq>=latest.seq) latest={seq:l.seq,at:d.at};
+    }
+    if(ok5){ let offline=false;
+      for(const a of anchors){ const d=a.doc;
+        try{ const r=await fetch(ANCHOR_LOG+d.at.replace(/[:.]/g,'-')+'.json',{cache:'no-store'});
+          if(r.status===404||r.status===403){ ok5=false; d5=`the anchor of ${d.at} is not in the public log`; break; }
+          if(!r.ok){ offline=true; break; }
+          const p=await r.json(), f=['format','at','count','merkle_root','cutover','root','sig'].find(k=>JSON.stringify(p[k])!==JSON.stringify(d[k]));
+          if(f){ ok5=false; d5=`the anchor of ${d.at} differs from the public log (${f})`; break; }
+        }catch(e){ offline=true; break; } }
+      const base=`${anchors.length} anchor${anchors.length===1?'':'s'} signed by the root · latest covers entry ${latest.seq}${cut?' · includes the cutover anchor':''}`;
+      if(ok5&&offline){ ok5=null; d5=base+' · not compared with the public log (offline)'; }
+      else if(ok5) d5=base+' · matched in the public log';
+    }
+  }
+  out.push({pass:ok5, ms:Math.round(performance.now()-t0), detail:d5, brokenAt:b5});
   return out;
 }
