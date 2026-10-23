@@ -29,14 +29,14 @@ const snapshot = fs.readFileSync(path.join(__dirname, '..', 'reference', 'page-r
     }
   } catch (e) {
     console.error(`could not read ${src}: ${e.message}`);
-    process.exit(2);
+    return void (process.exitCode = 2);
   }
   const lines = html.split(/\r?\n/);
   const start = lines.findIndex((l) => l.startsWith('async function runChecks('));
   const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && l === '}');
   if (start < 0 || end < 0) {
     console.error('runChecks not found on the live page');
-    process.exit(2);
+    return void (process.exitCode = 2);
   }
   const live = lines.slice(start, end + 1).join('\n');
   // The pins live outside runChecks: they must equal the CLI's built-in keys.
@@ -47,13 +47,13 @@ const snapshot = fs.readFileSync(path.join(__dirname, '..', 'reference', 'page-r
   }).map(([name]) => name);
   if (pinErrors.length) {
     console.log(`the page's pinned ${pinErrors.join(', ')} differ from the CLI's built-in values`);
-    process.exit(1);
+    return void (process.exitCode = 1);
   }
   if (live === snapshot) {
     console.log('live runChecks matches the snapshot, and the pinned keys match the CLI');
-    process.exit(0);
+    return void (process.exitCode = 0);
   }
   console.log('live runChecks DIFFERS from the snapshot; review the change, update');
   console.log('reference/page-runChecks.txt, and re-run npm test.');
-  process.exit(1);
+  return void (process.exitCode = 1);
 })();
